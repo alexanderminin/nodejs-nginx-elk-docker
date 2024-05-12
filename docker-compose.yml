@@ -9,49 +9,46 @@ networks:
 # will contain all elasticsearch data.
 volumes:
   elasticsearch-data:
+  filebeat-data:
 
 secrets:
   elasticsearch.keystore:
-    file: ./secrets/keystore/elasticsearch.keystore
+    file: ./sys/secrets/keystore/elasticsearch.keystore
   elasticsearch.service_tokens:
-    file: ./secrets/service_tokens
+    file: ./sys/secrets/service_tokens
   elastic.ca:
-    file: ./secrets/certs/ca/ca.crt
+    file: ./sys/secrets/certs/ca/ca.crt
   elasticsearch.certificate:
-    file: ./secrets/certs/elasticsearch/elasticsearch.crt
+    file: ./sys/secrets/certs/elasticsearch/elasticsearch.crt
   elasticsearch.key:
-    file: ./secrets/certs/elasticsearch/elasticsearch.key
+    file: ./sys/secrets/certs/elasticsearch/elasticsearch.key
   kibana.certificate:
-    file: ./secrets/certs/kibana/kibana.crt
+    file: ./sys/secrets/certs/kibana/kibana.crt
   kibana.key:
-    file: ./secrets/certs/kibana/kibana.key
+    file: ./sys/secrets/certs/kibana/kibana.key
   apm-server.certificate:
-    file: ./secrets/certs/apm-server/apm-server.crt
+    file: ./sys/secrets/certs/apm-server/apm-server.crt
   apm-server.key:
-    file: ./secrets/certs/apm-server/apm-server.key
+    file: ./sys/secrets/certs/apm-server/apm-server.key
 
 services:
   elasticsearch:
     image: elastdocker/elasticsearch:${ELK_VERSION}
     build:
-      context: elasticsearch/
+      context: sys/elasticsearch/
       args:
         ELK_VERSION: ${ELK_VERSION}
     restart: unless-stopped
     environment:
       ELASTIC_USERNAME: ${ELASTIC_USERNAME}
       ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
-      ELASTIC_CLUSTER_NAME: ${ELASTIC_CLUSTER_NAME}
-      ELASTIC_NODE_NAME: ${ELASTIC_NODE_NAME}
-      ELASTIC_INIT_MASTER_NODE: ${ELASTIC_INIT_MASTER_NODE}
-      ELASTIC_DISCOVERY_SEEDS: ${ELASTIC_DISCOVERY_SEEDS}
       ELASTICSEARCH_PORT: ${ELASTICSEARCH_PORT}
       ES_JAVA_OPTS: "-Xmx${ELASTICSEARCH_HEAP} -Xms${ELASTICSEARCH_HEAP} -Des.enforce.bootstrap.checks=true -Dlog4j2.formatMsgNoLookups=true"
       bootstrap.memory_lock: "true"
     volumes:
       - elasticsearch-data:/usr/share/elasticsearch/data
-      - ./elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
-      - ./elasticsearch/config/log4j2.properties:/usr/share/elasticsearch/config/log4j2.properties
+      - ./sys/elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+      - ./sys/elasticsearch/config/log4j2.properties:/usr/share/elasticsearch/config/log4j2.properties
     secrets:
       - source: elasticsearch.keystore
         target: /usr/share/elasticsearch/config/elasticsearch.keystore
@@ -76,17 +73,84 @@ services:
     healthcheck:
       test: ["CMD", "sh", "-c", "curl -sf --insecure https://$ELASTIC_USERNAME:$ELASTIC_PASSWORD@localhost:$ELASTICSEARCH_PORT/_cat/health | grep -ioE 'green|yellow' || echo 'not green/yellow cluster status'"]
 
-  logstash:
-    image: elastdocker/logstash:${ELK_VERSION}
+  kibana:
+    image: elastdocker/kibana:${ELK_VERSION}
     build:
-      context: logstash/
+      context: sys/kibana/
       args:
         ELK_VERSION: $ELK_VERSION
     restart: unless-stopped
     volumes:
-      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
-      - ./logstash/config/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
-      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./sys/kibana/config/:/usr/share/kibana/config:ro
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+      KIBANA_PORT: ${KIBANA_PORT}
+    env_file:
+      - ./sys/secrets/.env.kibana.token
+    secrets:
+      - source: elastic.ca
+        target: /certs/ca.crt
+      - source: kibana.certificate
+        target: /certs/kibana.crt
+      - source: kibana.key
+        target: /certs/kibana.key
+    ports:
+      - "${KIBANA_PORT}:${KIBANA_PORT}"
+
+  apm-server:
+    image: elastdocker/apm-server:${ELK_VERSION}
+    build:
+      context: sys/apm-server/
+      args:
+        ELK_VERSION: $ELK_VERSION
+    restart: unless-stopped
+    ports:
+      - "8200:8200"
+    volumes:
+      - ./sys/apm-server/config/apm-server.yml:/usr/share/apm-server/apm-server.yml:ro
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+      ELASTIC_APM_SECRET_TOKEN: ${ELASTIC_APM_SECRET_TOKEN}
+    secrets:
+      - source: elastic.ca
+        target: /certs/ca.crt
+      - source: apm-server.certificate
+        target: /certs/apm-server.crt
+      - source: apm-server.key
+        target: /certs/apm-server.key
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELK_VERSION}
+    restart: always
+    # -e flag to log to stderr and disable syslog/file output
+    command: -e --strict.perms=false
+    user: root
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      KIBANA_HOST_PORT: ${KIBANA_HOST}:${KIBANA_PORT}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+    volumes:
+      - ./sys/filebeat/filebeat.docker.logs.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - filebeat-data:/var/lib/filebeat/data
+
+  logstash:
+    image: elastdocker/logstash:${ELK_VERSION}
+    build:
+      context: sys/logstash/
+      args:
+        ELK_VERSION: $ELK_VERSION
+    restart: unless-stopped
+    volumes:
+      - ./sys/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./sys/logstash/config/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+      - ./sys/logstash/pipeline:/usr/share/logstash/pipeline:ro
     secrets:
       - source: elastic.ca
         target: /certs/ca.crt
@@ -101,52 +165,118 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-s" ,"-XGET", "http://127.0.0.1:9600"]
 
-  kibana:
-    image: elastdocker/kibana:${ELK_VERSION}
+  nginx:
     build:
-      context: kibana/
-      args:
-        ELK_VERSION: $ELK_VERSION
+        context: sys/nginx/
     restart: unless-stopped
     volumes:
-      - ./kibana/config/:/usr/share/kibana/config:ro
-    environment:
-      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
-      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
-      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
-      KIBANA_PORT: ${KIBANA_PORT}
-    env_file:
-      - ./secrets/.env.kibana.token
-    secrets:
-      - source: elastic.ca
-        target: /certs/ca.crt
-      - source: kibana.certificate
-        target: /certs/kibana.crt
-      - source: kibana.key
-        target: /certs/kibana.key
+      - ./sys/nginx/config:/etc/nginx/conf.d
+      - ./sys/nginx/log:/var/log/nginx
     ports:
-      - "${KIBANA_PORT}:${KIBANA_PORT}"
+      - "81:81"
+      - "443:443"
+    links:
+      - app:app
+    depends_on: 
+      - app
 
-  apm-server:
-    image: elastdocker/apm-server:${ELK_VERSION}
+  nginx-logstash:
+    image: elastdocker/logstash:${ELK_VERSION}
     build:
-      context: apm-server/
+      context: sys/logstash/
       args:
         ELK_VERSION: $ELK_VERSION
     restart: unless-stopped
-    ports:
-      - "8200:8200"
     volumes:
-      - ./apm-server/config/apm-server.yml:/usr/share/apm-server/apm-server.yml:ro
+      - ./sys/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./sys/logstash/config/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+      - ./sys/logstash/pipeline-nginx:/usr/share/logstash/pipeline:ro
+    secrets:
+      - source: elastic.ca
+        target: /certs/ca.crt
     environment:
       ELASTIC_USERNAME: ${ELASTIC_USERNAME}
       ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
       ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
-      ELASTIC_APM_SECRET_TOKEN: ${ELASTIC_APM_SECRET_TOKEN}
+      LS_JAVA_OPTS: "-Xmx${LOGSTASH_HEAP} -Xms${LOGSTASH_HEAP} -Dlog4j2.formatMsgNoLookups=true"
+    ports:
+      - "5046:5044"
+      - "9602:9600"
+    healthcheck:
+      test: ["CMD", "curl", "-s" ,"-XGET", "http://127.0.0.1:9602"]
+
+  nginx-filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELK_VERSION}
+    restart: always
+    command: filebeat -e -strict.perms=false
+    user: root
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      KIBANA_HOST_PORT: ${KIBANA_HOST}:${KIBANA_PORT}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+    volumes:
+        - ./sys/filebeat/filebeat.nginx.yml:/usr/share/filebeat/filebeat.yml:ro
+        - ./sys/nginx/log:/var/log/nginx
+
+  app:
+    build:
+      context: app/ 
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - apm-server
+    volumes:
+        - ./app-logs:/src/logs
     secrets:
       - source: elastic.ca
         target: /certs/ca.crt
-      - source: apm-server.certificate
-        target: /certs/apm-server.crt
-      - source: apm-server.key
-        target: /certs/apm-server.key
+    environment:
+      ELASTIC_APM_SERVER_URL: https://${APMSERVER_HOST}:${APMSERVER_PORT}
+      ELASTIC_APM_VERIFY_SERVER_CERT: true
+      ELASTIC_APM_ENVIRONMENT: development
+      ELASTIC_APM_LOG_LEVEL: trace
+      ELASTIC_APM_SERVICE_NAME: app
+      ELASTIC_APM_SECRET_TOKEN: ${ELASTIC_APM_SECRET_TOKEN}
+      ELASTIC_APM_SERVER_CA_CERT_FILE: /certs/ca.crt
+
+  app-logs-logstash:
+    image: elastdocker/logstash:${ELK_VERSION}
+    build:
+      context: sys/logstash/
+      args:
+        ELK_VERSION: $ELK_VERSION
+    restart: unless-stopped
+    volumes:
+      - ./sys/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./sys/logstash/config/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+      - ./sys/logstash/pipeline-app-logs:/usr/share/logstash/pipeline:ro
+    secrets:
+      - source: elastic.ca
+        target: /certs/ca.crt
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+      LS_JAVA_OPTS: "-Xmx${LOGSTASH_HEAP} -Xms${LOGSTASH_HEAP} -Dlog4j2.formatMsgNoLookups=true"
+    ports:
+      - "5045:5044"
+      - "9601:9600"
+    healthcheck:
+      test: ["CMD", "curl", "-s" ,"-XGET", "http://127.0.0.1:9601"]
+    
+  app-logs-filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELK_VERSION}
+    restart: always
+    command: filebeat -e -strict.perms=false
+    user: root
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      KIBANA_HOST_PORT: ${KIBANA_HOST}:${KIBANA_PORT}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+    volumes:
+        - ./sys/filebeat/filebeat.app-logs.yml:/usr/share/filebeat/filebeat.yml:ro
+        - ./app-logs:/src/logs
